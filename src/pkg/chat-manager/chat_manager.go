@@ -66,6 +66,7 @@ func NewChatManager(databaseManager *databasemanager.DatabaseManager, imageProce
 		Bot:             bot,
 		DatabaseManager: databaseManager,
 		ImageProcessor:  imageProcessor,
+		Token:           token,
 	}
 }
 
@@ -85,6 +86,7 @@ func (cm *ChatManager) Start() {
 	// Add handlers for commands and messages
 	dispatcher.AddHandler(handlers.NewCommand("start", cm.handleStart))
 	dispatcher.AddHandler(handlers.NewCommand("history", cm.handleHistory))
+	dispatcher.AddHandler(handlers.NewCommand("echo", cm.echo))
 	dispatcher.AddHandler(handlers.NewMessage(message.Photo, cm.handleImage))
 
 	err := updater.StartPolling(cm.Bot, &ext.PollingOpts{
@@ -106,7 +108,7 @@ func (cm *ChatManager) Start() {
 }
 
 func (cm *ChatManager) handleStart(b *gotgbot.Bot, ctx *ext.Context) error {
-	_, err := b.SendMessage(ctx.EffectiveChat.Id, "Hi! Send me a workout image and I will log the details.")
+	_, err := b.SendMessage(ctx.EffectiveChat.Id, "Hi! Send me a workout image and I will log the details.", nil)
 	return err
 }
 
@@ -146,7 +148,8 @@ func (cm *ChatManager) handleHistory(b *gotgbot.Bot, ctx *ext.Context) error {
 
 func (cm *ChatManager) downloadFile(url string, filepath string, ctx *ext.Context) error {
 	// Download the file
-	resp, err := http.Get(TELEGRAM_FILE_URL + cm.Token + "/" + filepath)
+	log.Debug().Msgf("Downloading image file from %s", url)
+	resp, err := http.Get(url)
 	if err != nil {
 		log.Warn().Msgf("Error downloading image file:", err)
 		_, err := cm.Bot.SendMessage(ctx.EffectiveChat.Id, "Error processing image. Please try again.", nil)
@@ -185,6 +188,7 @@ func (cm *ChatManager) downloadFile(url string, filepath string, ctx *ext.Contex
 }
 
 func (cm *ChatManager) handleImage(b *gotgbot.Bot, ctx *ext.Context) error {
+	log.Debug().Msgf("Handling image...")
 	if ctx.Message.Photo == nil {
 		_, err := b.SendMessage(ctx.EffectiveChat.Id, "Please send a valid image.", nil)
 		return err
@@ -200,6 +204,7 @@ func (cm *ChatManager) handleImage(b *gotgbot.Bot, ctx *ext.Context) error {
 		where <file_path> is taken from the response.
 	*/
 
+	log.Debug().Msgf("Getting file...")
 	file, err := b.GetFile(photo.FileId, nil)
 	if err != nil {
 		log.Warn().Msgf("Error getting image file:", err)
@@ -207,22 +212,29 @@ func (cm *ChatManager) handleImage(b *gotgbot.Bot, ctx *ext.Context) error {
 		return err
 	}
 
+	log.Debug().Msgf("Received file: %v", file)
+
 	imagePath := "image.jpg"
+	log.Info().Msgf("Downloading image file into %s", imagePath)
+
+	log.Debug().Msgf("File Download Path: %s", file.FilePath)
 	cm.downloadFile(TELEGRAM_FILE_URL+cm.Token+"/"+file.FilePath, imagePath, ctx)
 
 	text, err := cm.ImageProcessor.ProcessImage(imagePath)
 	if err != nil {
 		log.Warn().Msgf("Error processing image:", err)
-		_, err := b.SendMessage(ctx.EffectiveChat.Id, "Error processing image. Please try again.")
+		_, err := b.SendMessage(ctx.EffectiveChat.Id, "Error processing image. Please try again.", nil)
 		return err
 	}
 
 	workoutDetails, err := cm.ImageProcessor.ParseWorkoutDetails(text)
 	if err != nil {
 		log.Warn().Msgf("Error extracting workout details:", err)
-		_, err := b.SendMessage(ctx.EffectiveChat.Id, "Error extracting workout details. Please try again.")
+		_, err := b.SendMessage(ctx.EffectiveChat.Id, "Error extracting workout details. Please try again.", nil)
 		return err
 	}
+
+	log.Debug().Msgf("Workout details: %v", workoutDetails)
 
 	// Save the workout data
 	log.Debug().Msgf("Locking the database")
@@ -233,18 +245,20 @@ func (cm *ChatManager) handleImage(b *gotgbot.Bot, ctx *ext.Context) error {
 		Text:      strings.Join([]string{workoutDetails["Distance"], workoutDetails["Pace"], workoutDetails["HeartRate"]}, ", "),
 		Timestamp: timestamp,
 	})
+
+	log.Debug().Msgf("Unlocking the database")
 	cm.DatabaseManager.Data.Unlock()
 
 	err = cm.DatabaseManager.SaveData()
 	if err != nil {
 		log.Warn().Msgf("Error saving workout data:", err)
-		_, err := b.SendMessage(ctx.EffectiveChat.Id, "Error saving workout data.")
+		_, err := b.SendMessage(ctx.EffectiveChat.Id, "Error saving workout data.", nil)
 		return err
 	}
 
 	_, err = b.SendMessage(ctx.EffectiveChat.Id, "Workout logged!\n"+
 		"Distance: "+workoutDetails["Distance"]+"\n"+
 		"Avg Pace: "+workoutDetails["Pace"]+"\n"+
-		"Avg Heart Rate: "+workoutDetails["HeartRate"])
+		"Avg Heart Rate: "+workoutDetails["HeartRate"], nil)
 	return err
 }

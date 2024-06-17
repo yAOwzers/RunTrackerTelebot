@@ -1,0 +1,11 @@
+version: '3.8'
+services:
+  runTrackerBot:
+    image: runtrackerbot:latest
+    container_name: runTrackerBot
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data/workout_data.json:/app/data/workout_data.json
