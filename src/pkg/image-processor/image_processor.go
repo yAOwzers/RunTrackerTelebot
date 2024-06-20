@@ -4,6 +4,8 @@ import (
 	"os"
 	"regexp"
 	"run-tracker-telebot/src/log"
+	"strings"
+	"time"
 
 	"github.com/otiai10/gosseract/v2"
 )
@@ -27,28 +29,6 @@ func (ip *ImageProcessor) ProcessImage(imagePath string) (string, error) {
 		return "", err
 	}
 
-	// file, err := os.Open(imagePath)
-	// if err != nil {
-	// 	log.Warn().Msgf("Unable to open image: %v", err)
-	// 	return "", err
-	// }
-
-	// defer file.Close()
-
-	// log.Debug().Msgf("Decoding image...")
-	// img, _, err := image.Decode(file)
-	// if err != nil {
-	// 	log.Warn().Msgf("Unable to decode image: %v", err)
-	// 	return "", err
-	// }
-
-	// buffer := new(bytes.Buffer)
-	// if err := jpeg.Encode(buffer, img, nil); err != nil {
-	// 	log.Warn().Msgf("Unable to encode image.")
-	// }
-
-	// // Perform OCR on the image
-	// client.SetImageFromBytes(buffer.Bytes())
 	client.SetImage(imagePath)
 	text, err := client.Text()
 	if err != nil {
@@ -63,24 +43,48 @@ func (ip *ImageProcessor) ProcessImage(imagePath string) (string, error) {
 
 func (ip *ImageProcessor) ParseWorkoutDetails(text string) (map[string]string, error) {
 	// Define regular expressions for matching
-	dateRegex := regexp.MustCompile(`(?m)Fri, \d{2} \w{3}`)
-	distanceRegex := regexp.MustCompile(`\d+\.\d+[a-zA-Z]+`)
-	paceRegex := regexp.MustCompile(`\d{1,2}'\d{2}"/[a-zA-Z]+`)
-	heartRateRegex := regexp.MustCompile(`\d{2,3}BPM`)
+	distanceRegex := regexp.MustCompile(`\d+\.\d+[a-zA-Z]*`)
+	paceRegex := regexp.MustCompile(`\d{1,2}[':]\d{2}(")?/[a-zA-Z]*`)
+	// heartRateRegex := regexp.MustCompile(`\d{2,3}[BPM]{0,1}`)
 
 	// Extract details using regular expressions
-	date := dateRegex.FindString(text)
 	distance := distanceRegex.FindString(text)
 	pace := paceRegex.FindString(text)
-	heartRate := heartRateRegex.FindString(text)
+	// heartRate := heartRateRegex.FindString(text)
 
+	log.Debug().Msgf("Distance: %s", distance)
+	log.Debug().Msgf("Pace: %s", pace)
+	// log.Debug().Msgf("Heart Rate: %s", heartRate)
+
+	if distance == "" || pace == "" {
+		log.Warn().Msgf("Error extracting workout details")
+		return nil, nil
+	}
+
+	distance = cleanDistanceData(distance)
+
+	date := time.Now().Format("2006-01-02")
 	// Store extracted details in a map
 	workoutDetails := map[string]string{
-		"Date":      date,
-		"Distance":  distance,
-		"Pace":      pace,
-		"HeartRate": heartRate,
+		"Date":     date,
+		"Distance": distance,
+		"Pace":     pace,
+		// "HeartRate": heartRate,
 	}
 
 	return workoutDetails, nil
+}
+
+func cleanDistanceData(distance string) string {
+	log.Debug().Msgf("Cleaning distance data: %s", distance)
+
+	distance = strings.TrimSuffix(distance, ",")
+	log.Debug().Msgf("Distance after trimming: %s", distance)
+
+	re := regexp.MustCompile(`[a-zA-Z]+`)
+
+	distance = re.ReplaceAllString(distance, "KM")
+	log.Debug().Msgf("After replacing strings: %s", distance)
+
+	return distance
 }

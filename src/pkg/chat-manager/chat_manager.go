@@ -8,13 +8,12 @@ import (
 	"run-tracker-telebot/src/log"
 	databasemanager "run-tracker-telebot/src/pkg/database-manager"
 	imageprocessor "run-tracker-telebot/src/pkg/image-processor"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 	"github.com/PaulSonOfLars/gotgbot/v2/ext"
 	"github.com/PaulSonOfLars/gotgbot/v2/ext/handlers"
+	"github.com/PaulSonOfLars/gotgbot/v2/ext/handlers/conversation"
 	"github.com/PaulSonOfLars/gotgbot/v2/ext/handlers/filters/message"
 )
 
@@ -70,6 +69,11 @@ func NewChatManager(databaseManager *databasemanager.DatabaseManager, imageProce
 	}
 }
 
+const (
+	USER = "user"
+	WEEK = "week"
+)
+
 func (cm *ChatManager) Start() {
 
 	// Create updater and dispatcher.
@@ -81,12 +85,38 @@ func (cm *ChatManager) Start() {
 		},
 		MaxRoutines: ext.DefaultMaxRoutines,
 	})
+
 	updater := ext.NewUpdater(dispatcher, nil)
 
 	// Add handlers for commands and messages
 	dispatcher.AddHandler(handlers.NewCommand("start", cm.handleStart))
-	dispatcher.AddHandler(handlers.NewCommand("history", cm.handleHistory))
-	dispatcher.AddHandler(handlers.NewCommand("echo", cm.echo))
+	dispatcher.AddHandler(handlers.NewCommand("historyUser", cm.handleUserHistory))
+	dispatcher.AddHandler(handlers.NewCommand("historyAll", cm.handleAllHistory))
+	dispatcher.AddHandler(handlers.NewConversation(
+		[]ext.Handler{handlers.NewCommand("delete", cm.handleWelcomeDelete)},
+		map[string][]ext.Handler{
+			USER: {handlers.NewMessage(noCommands, cm.handleDelete)},
+		},
+		&handlers.ConversationOpts{
+			Exits:        []ext.Handler{handlers.NewCommand("cancel", cm.handleCancel)},
+			StateStorage: conversation.NewInMemoryStorage(conversation.KeyStrategySenderAndChat),
+			AllowReEntry: true,
+		},
+	))
+
+	// dispatcher.AddHandler(handlers.NewConversation(
+	// 	[]ext.Handler{handlers.NewCommand("getdistance", cm.handleWelcomeDistance)},
+	// 	map[string][]ext.Handler{
+	// 		WEEK: {handlers.NewMessage(noCommands, cm.handleDistance)},
+	// 	},
+	// 	&handlers.ConversationOpts{
+	// 		Exits:        []ext.Handler{handlers.NewCommand("cancel", cm.handleCancel)},
+	// 		StateStorage: conversation.NewInMemoryStorage(conversation.KeyStrategySenderAndChat),
+	// 		AllowReEntry: true,
+	// 	},
+	// ))
+
+	dispatcher.AddHandler(handlers.NewCommand("help", cm.handleHelp))
 	dispatcher.AddHandler(handlers.NewMessage(message.Photo, cm.handleImage))
 
 	err := updater.StartPolling(cm.Bot, &ext.PollingOpts{
@@ -107,43 +137,191 @@ func (cm *ChatManager) Start() {
 	updater.Idle()
 }
 
+func noCommands(msg *gotgbot.Message) bool {
+	return message.Text(msg) && !message.Command(msg)
+}
+
+func (cm *ChatManager) handleCancel(b *gotgbot.Bot, ctx *ext.Context) error {
+	_, err := ctx.EffectiveMessage.Reply(b, "Oh, goodbye!", &gotgbot.SendMessageOpts{
+		ParseMode: "html",
+	})
+	if err != nil {
+		return fmt.Errorf("failed to send cancel message: %w", err)
+	}
+	return handlers.EndConversation()
+}
+
 func (cm *ChatManager) handleStart(b *gotgbot.Bot, ctx *ext.Context) error {
 	_, err := b.SendMessage(ctx.EffectiveChat.Id, "Hi! Send me a workout image and I will log the details.", nil)
 	return err
 }
 
-// echo replies to a messages with its own contents.
-func (cm *ChatManager) echo(b *gotgbot.Bot, ctx *ext.Context) error {
-	_, err := ctx.EffectiveMessage.Reply(b, ctx.EffectiveMessage.Text, nil)
+func (cm *ChatManager) handleHelp(b *gotgbot.Bot, ctx *ext.Context) error {
+	helpMessage := "Welcome to Run Tracker Bot!\n" +
+		"Commands:\n" +
+		"/start - Start the bot\n" +
+		"/historyUser - Get your workout history\n" +
+		"/historyAll - Get all workout history for the group\n" +
+		"/delete - Delete a workout entry\n" +
+		"/cancel - Cancel the current operation\n" +
+		"/help - Show this help message\n"
+
+	_, err := ctx.EffectiveMessage.Reply(b, helpMessage, nil)
 	if err != nil {
-		log.Warn().Msgf("failed to echo message:", err)
-		return fmt.Errorf("failed to echo message: %w", err)
+		log.Warn().Msgf("failed to send help message:", err)
+		return fmt.Errorf("failed to send help message: %w", err)
 	}
 	return nil
 }
 
-func (cm *ChatManager) handleHistory(b *gotgbot.Bot, ctx *ext.Context) error {
-	workouts, ok := cm.DatabaseManager.Data.Workouts[ctx.EffectiveUser.Id]
-	if !ok {
-		log.Warn().Msgf("No workout history found.")
-		_, err := b.SendMessage(ctx.EffectiveChat.Id, "No workout history found.", nil)
+func (cm *ChatManager) handleAllHistory(b *gotgbot.Bot, ctx *ext.Context) error {
+
+	chatID := ctx.EffectiveChat.Id
+
+	groupWorkouts, err := cm.DatabaseManager.GetAllWorkouts(chatID)
+	if err != nil {
+		log.Warn().Msgf("Error getting all workouts for group %d: %v", chatID, err)
+		_, err := b.SendMessage(ctx.EffectiveChat.Id, "Error getting all workouts for group.", nil)
 		return err
 	}
 
-	response := "Your workout history:\n"
-	for _, entry := range workouts {
-		entryTimestamp, err := strconv.ParseInt(entry.Timestamp, 10, 64)
-		if err != nil {
-			log.Warn().Msgf("Error parsing timestamp:", err)
-			return err
-		}
+	// Prepare a string to send as a message
+	var message string
+	// message += fmt.Sprintf("Workouts for Group %d:\n", chatID)
 
-		timestamp := time.Unix(entryTimestamp, 0)
-		response += timestamp.Format("2006-01-02 15:04:05") + ": " + entry.Text + "\n"
+	// Iterate over the groupWorkouts map
+	for userId, dates := range groupWorkouts {
+		message += fmt.Sprintf("User ID: %d\n", userId)
+		for date, workoutEntry := range dates {
+			message += fmt.Sprintf("Date: %s\n", date)
+			message += fmt.Sprintf("- Distance: %s, Pace: %s \n", workoutEntry.Distance, workoutEntry.Pace)
+		}
 	}
 
-	_, err := b.SendMessage(ctx.EffectiveChat.Id, response, nil)
-	return err
+	// Process and send all workouts for the group
+	log.Info().Msgf("All Workouts for Group %d: %v\n", chatID, groupWorkouts)
+
+	_, err = ctx.EffectiveMessage.Reply(b, "Workouts for Group: "+message+"\n", nil)
+	if err != nil {
+		log.Warn().Msgf("Error sending message to user in telegram:", err)
+		return err
+	}
+	return nil
+}
+
+func (cm *ChatManager) handleUserHistory(b *gotgbot.Bot, ctx *ext.Context) error {
+
+	chatID := ctx.EffectiveChat.Id
+	userID := ctx.EffectiveUser.Id
+
+	userWorkouts, err := cm.DatabaseManager.GetUserWorkouts(chatID, userID)
+	if err != nil {
+		log.Warn().Msgf("Error getting workouts for user %d in group %d: %v", userID, chatID, err)
+		_, err := ctx.EffectiveMessage.Reply(b, "No existing workout history for user in group.", nil)
+		if err != nil {
+			log.Warn().Msgf("Error sending message to user in telegram:", err)
+		}
+		return err
+	}
+
+	var message string
+	message += fmt.Sprintf("User ID: %d\n", userID)
+	for date, workout := range userWorkouts {
+		message += fmt.Sprintf("Date: %s\n", date)
+		message += fmt.Sprintf("- Distance: %s, Pace: %s \n", workout.Distance, workout.Pace)
+	}
+
+	// Process and send workouts for the specified user
+	log.Info().Msgf("Workouts for User %d: %v\n", userID, userWorkouts)
+	_, err = ctx.EffectiveMessage.Reply(b, "Workouts for User:\n "+message+"\n", nil)
+	if err != nil {
+		log.Warn().Msgf("Error sending message to user in telegram:", err)
+		return err
+	}
+
+	log.Debug().Msgf("Releasing lock...")
+	// workouts, ok := cm.DatabaseManager.Data.Workouts[ctx.EffectiveUser.Id]
+	// if !ok {
+	// 	log.Warn().Msgf("No workout history found.")
+	// 	_, err := b.SendMessage(ctx.EffectiveChat.Id, "No workout history found.", nil)
+	// 	return err
+	// }
+
+	// response := "Your workout history:\n"
+	// for _, entry := range workouts {
+	// 	entryTimestamp, err := strconv.ParseInt(entry.Timestamp, 10, 64)
+	// 	if err != nil {
+	// 		log.Warn().Msgf("Error parsing timestamp:", err)
+	// 		return err
+	// 	}
+
+	// 	timestamp := time.Unix(entryTimestamp, 0)
+	// 	response += timestamp.Format("2006-01-02 15:04:05") + ": " + entry.Text + "\n"
+	// }
+
+	// _, err := b.SendMessage(ctx.EffectiveChat.Id, response, nil)
+	return nil
+}
+
+func isVerifiedDateFormat(date string) bool {
+
+	// check if date is in the form of "2006-01-02"
+
+	const layout = "2006-01-02"
+	_, err := time.Parse(layout, date)
+	if err != nil {
+		log.Warn().Msgf("Date is not in the right form: ", err)
+		return false
+	}
+
+	return true
+}
+
+func (cm *ChatManager) handleDelete(b *gotgbot.Bot, ctx *ext.Context) error {
+	chatID := ctx.EffectiveChat.Id
+	userID := ctx.EffectiveUser.Id
+
+	// Wait for user's response
+	// Add handler to capture the user's response
+	dateInput := ctx.EffectiveMessage.Text
+
+	if !isVerifiedDateFormat(dateInput) {
+		log.Warn().Msgf("Invalid date format. Please provide the date in the format YYYY-MM-DD.")
+		_, err := ctx.EffectiveMessage.Reply(b, "Invalid date format. Please provide the date in the format YYYY-MM-DD.", nil)
+		if err != nil {
+			log.Warn().Msgf("Error sending message to user in telegram:", err)
+			return err
+		}
+		return fmt.Errorf("Invalid date format. Please provide the date in the format YYYY-MM-DD.")
+	}
+
+	if cm.DatabaseManager.DeleteWorkout(chatID, userID, dateInput) {
+		_, err := ctx.EffectiveMessage.Reply(b, "Workout entry deleted successfully.", nil)
+		if err != nil {
+			log.Warn().Msgf("Error sending message to user in telegram:", err)
+			return err
+		}
+	} else {
+		_, err := ctx.EffectiveMessage.Reply(b, "No workout entry found for the provided date.", nil)
+		if err != nil {
+			log.Warn().Msgf("Error sending message to user in telegram:", err)
+			return err
+		}
+	}
+
+	return nil
+
+}
+
+func (cm *ChatManager) handleWelcomeDelete(b *gotgbot.Bot, ctx *ext.Context) error {
+	// Prompt the user to provide the date of the workout entry to delete
+	_, err := ctx.EffectiveMessage.Reply(b, "Please provide the date of the workout entry you want to delete (format: YYYY-MM-DD):", nil)
+	if err != nil {
+		log.Warn().Msgf("Error sending message to user in telegram:", err)
+		return err
+	}
+
+	return handlers.NextConversationState(USER)
 }
 
 func (cm *ChatManager) downloadFile(url string, filepath string, ctx *ext.Context) error {
@@ -188,9 +366,18 @@ func (cm *ChatManager) downloadFile(url string, filepath string, ctx *ext.Contex
 }
 
 func (cm *ChatManager) handleImage(b *gotgbot.Bot, ctx *ext.Context) error {
+
+	userId := ctx.EffectiveUser.Id
+	chatId := ctx.EffectiveChat.Id
+
 	log.Debug().Msgf("Handling image...")
 	if ctx.Message.Photo == nil {
-		_, err := b.SendMessage(ctx.EffectiveChat.Id, "Please send a valid image.", nil)
+		_, err := ctx.EffectiveMessage.Reply(b, "Please send a valid image.", nil)
+		if err != nil {
+			log.Warn().Msgf("Error sending message to user in telegram:", err)
+			return err
+		}
+		log.Warn().Msgf("No image found in message.")
 		return err
 	}
 
@@ -240,25 +427,37 @@ func (cm *ChatManager) handleImage(b *gotgbot.Bot, ctx *ext.Context) error {
 	log.Debug().Msgf("Locking the database")
 	cm.DatabaseManager.Data.Lock()
 
-	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
-	cm.DatabaseManager.Data.Workouts[ctx.EffectiveUser.Id] = append(cm.DatabaseManager.Data.Workouts[ctx.EffectiveUser.Id], databasemanager.WorkoutEntry{
-		Text:      strings.Join([]string{workoutDetails["Distance"], workoutDetails["Pace"], workoutDetails["HeartRate"]}, ", "),
-		Timestamp: timestamp,
-	})
+	date := time.Now().Format("2006-01-02")
+	didInsert := cm.DatabaseManager.InsertWorkoutEntry(chatId, userId, date, workoutDetails)
+
+	// cm.DatabaseManager.Data.Workouts[ctx.EffectiveUser.Id] = append(cm.DatabaseManager.Data.Workouts[ctx.EffectiveUser.Id], databasemanager.WorkoutEntry{
+	// 	Text:      strings.Join([]string{workoutDetails["Distance"], workoutDetails["Pace"], workoutDetails["HeartRate"]}, ", "),
+	// 	Timestamp: timestamp,
+	// })
 
 	log.Debug().Msgf("Unlocking the database")
 	cm.DatabaseManager.Data.Unlock()
 
-	err = cm.DatabaseManager.SaveData()
-	if err != nil {
-		log.Warn().Msgf("Error saving workout data:", err)
-		_, err := b.SendMessage(ctx.EffectiveChat.Id, "Error saving workout data.", nil)
+	if didInsert {
+		err = cm.DatabaseManager.SaveData()
+		if err != nil {
+			log.Warn().Msgf("Error saving workout data:", err)
+			_, err := b.SendMessage(ctx.EffectiveChat.Id, "Error saving workout data.", nil)
+			return err
+		}
+
+		_, err = ctx.EffectiveMessage.Reply(b, "Workout logged!\n"+
+			"Date: "+workoutDetails["Date"]+"\n"+
+			"Distance: "+workoutDetails["Distance"]+"\n"+
+			"Avg Pace: "+workoutDetails["Pace"]+"\n", nil)
+		return err
+	} else {
+		_, err = ctx.EffectiveMessage.Reply(b, "Invalid workout details. No insertion performed into database.", nil)
+		if err != nil {
+			log.Warn().Msgf("Error sending message to user in telegram:", err)
+			return err
+		}
+		log.Warn().Msgf("Invalid workout details. No insertion performed into database.")
 		return err
 	}
-
-	_, err = b.SendMessage(ctx.EffectiveChat.Id, "Workout logged!\n"+
-		"Distance: "+workoutDetails["Distance"]+"\n"+
-		"Avg Pace: "+workoutDetails["Pace"]+"\n"+
-		"Avg Heart Rate: "+workoutDetails["HeartRate"], nil)
-	return err
 }

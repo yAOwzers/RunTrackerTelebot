@@ -10,13 +10,13 @@ import (
 )
 
 type WorkoutData struct {
-	Workouts map[int64][]WorkoutEntry `json:"workouts"`
+	Workouts map[int64]map[int64]map[string]WorkoutEntry `json:"workouts"`
 	sync.Mutex
 }
 
 type WorkoutEntry struct {
-	Text      string `json:"text"`
-	Timestamp string `json:"timestamp"`
+	Distance string `json:"distance"`
+	Pace     string `json:"pace"`
 }
 
 type DatabaseManager struct {
@@ -32,6 +32,58 @@ func NewDatabaseManager(filePath string) *DatabaseManager {
 		FilePath: filePath,
 		Data:     &WorkoutData{},
 	}
+}
+
+func NewWorkoutData() *WorkoutData {
+	return &WorkoutData{
+		Workouts: make(map[int64]map[int64]map[string]WorkoutEntry),
+	}
+}
+
+func (db *DatabaseManager) AddWorkout(groupID, userID int64, date string, entry WorkoutEntry) {
+
+	log.Debug().Msgf("Acquiring lock...")
+	db.Data.Lock()
+	defer db.Data.Unlock()
+
+	if db.Data.Workouts[groupID] == nil {
+		db.Data.Workouts[groupID] = make(map[int64]map[string]WorkoutEntry)
+	}
+
+	if db.Data.Workouts[groupID][userID] == nil {
+		db.Data.Workouts[groupID][userID][date] = WorkoutEntry{}
+	}
+
+	db.Data.Workouts[groupID][userID][date] = entry
+
+	log.Debug().Msgf("Added workout entry: %v", entry)
+	db.SaveData()
+}
+
+func (db *DatabaseManager) GetUserWorkouts(groupID, userID int64) (map[string]WorkoutEntry, error) {
+	log.Debug().Msgf("Acquiring lock...")
+	db.Data.Lock()
+	defer db.Data.Unlock()
+
+	if db.Data.Workouts[groupID] == nil {
+		log.Warn().Msgf("No workouts found for group: %v", groupID)
+		return nil, fmt.Errorf("no workouts found for group: %v", groupID)
+	}
+
+	return db.Data.Workouts[groupID][userID], nil
+}
+
+func (db *DatabaseManager) GetAllWorkouts(groupID int64) (map[int64]map[string]WorkoutEntry, error) {
+	log.Debug().Msgf("Acquiring lock...")
+	db.Data.Lock()
+	defer db.Data.Unlock()
+
+	if db.Data.Workouts[groupID] == nil {
+		log.Warn().Msgf("No workouts found for group: %v", groupID)
+		return nil, fmt.Errorf("no workouts found for group: %v", groupID)
+	}
+
+	return db.Data.Workouts[groupID], nil
 }
 
 func (db *DatabaseManager) LoadData() error {
@@ -59,7 +111,7 @@ func (db *DatabaseManager) LoadData() error {
 	// Initialize dm.Data.Workouts map if nil
 	if db.Data.Workouts == nil {
 		log.Debug().Msgf("Initializing Workouts map")
-		db.Data.Workouts = make(map[int64][]WorkoutEntry)
+		db.Data.Workouts = make(map[int64]map[int64]map[string]WorkoutEntry)
 	}
 
 	// Unmarshal JSON into WorkoutData struct
@@ -72,20 +124,97 @@ func (db *DatabaseManager) LoadData() error {
 }
 
 func (db *DatabaseManager) SaveData() error {
-	db.Data.Lock()
-	defer db.Data.Unlock()
-
-	data, err := json.MarshalIndent(db.Data, "", "    ")
+	file, err := os.Create(db.FilePath)
 	if err != nil {
-		log.Warn().Msgf("Error marshalling data: %v", err)
+		log.Warn().Msgf("Error creating file: %v", err)
 		return err
 	}
+	defer file.Close()
 
-	err = ioutil.WriteFile(db.FilePath, data, 0644)
+	log.Debug().Msgf("Saving data to file: %v", db.FilePath)
+	encoder := json.NewEncoder(file)
+
+	log.Debug().Msgf("Encoding data: %v", db.Data)
+	err = encoder.Encode(db.Data)
 	if err != nil {
-		log.Warn().Msgf("Error writing to file: %v", err)
+		log.Warn().Msgf("Error encoding data: %v", err)
 		return err
 	}
 
 	return nil
+}
+
+func (db *DatabaseManager) InsertWorkoutEntry(chatID int64, userID int64, date string, workoutDetails map[string]string) bool {
+
+	log.Debug().Msgf("Inserting Workout Entry in database: %v", workoutDetails)
+
+	if workoutDetails["Distance"] == "" || workoutDetails["Pace"] == "" {
+		log.Warn().Msgf("Invalid workout details: %v", workoutDetails)
+		log.Warn().Msgf("No insertion performed into database")
+		return false
+	}
+
+	if db.Data.Workouts == nil {
+		log.Debug().Msgf("Initializing Workouts map")
+		db.Data.Workouts = make(map[int64]map[int64]map[string]WorkoutEntry)
+	}
+
+	if db.Data.Workouts[chatID] == nil {
+		log.Debug().Msgf("Initializing chatID map")
+		db.Data.Workouts[chatID] = make(map[int64]map[string]WorkoutEntry)
+	}
+
+	if db.Data.Workouts[chatID][userID] == nil {
+		log.Debug().Msgf("Initializing userID map")
+		db.Data.Workouts[chatID][userID] = make(map[string]WorkoutEntry)
+	}
+
+	log.Debug().Msgf("Appending into Workout Database: %v", workoutDetails)
+	db.Data.Workouts[chatID][userID][date] = WorkoutEntry{
+		Distance: workoutDetails["Distance"],
+		Pace:     workoutDetails["Pace"],
+	}
+
+	log.Info().Msgf("Workout entry inserted into database successfully: %v", workoutDetails)
+	return true
+}
+
+func (db *DatabaseManager) DeleteWorkout(chatID int64, userID int64, date string) bool {
+	log.Debug().Msgf("Acquiring lock...")
+	db.Data.Lock()
+	defer db.Data.Unlock()
+
+	if db.Data.Workouts[chatID] == nil {
+		log.Warn().Msgf("No workouts found for chat: %v", chatID)
+		return false
+	}
+	// Check if the map at chatID level exists
+	log.Debug().Msgf("Checking if chatID exists: %v", chatID)
+	if userMap, ok := db.Data.Workouts[chatID]; ok {
+		// Check if the map at userID level exists
+
+		log.Debug().Msgf("Checking if userID exists: %v", userID)
+		if dateMap, ok := userMap[userID]; ok {
+			// Delete the date key
+
+			log.Info().Msgf("Deleting workout entry for user: %v, date: %v", userID, date)
+			delete(dateMap, date)
+
+			// If the dateMap becomes empty after deletion, clean up the map
+			log.Debug().Msgf("Checking if dateMap is empty after deletion: %v", len(dateMap))
+			if len(dateMap) == 0 {
+				log.Info().Msgf("DateMap is empty, deleting userMap: %v", userID)
+				delete(userMap, userID)
+			}
+
+			log.Debug().Msgf("Checking if userMap is empty after deletion: %v", len(userMap))
+			// If the userMap becomes empty after deletion, clean up the map
+			if len(userMap) == 0 {
+				log.Info().Msgf("UserMap is empty, deleting chatID: %v", chatID)
+				delete(db.Data.Workouts, chatID)
+			}
+		}
+	}
+
+	return true
 }
