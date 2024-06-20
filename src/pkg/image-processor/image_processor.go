@@ -83,7 +83,7 @@ func cleanDistanceData(distance string) string {
 
 	re := regexp.MustCompile(`[a-zA-Z]+`)
 
-	distance = re.ReplaceAllString(distance, "KM")
+	distance = re.ReplaceAllString(distance, "")
 	log.Debug().Msgf("After replacing strings: %s", distance)
 
 	return distance

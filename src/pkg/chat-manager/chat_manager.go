@@ -8,6 +8,7 @@ import (
 	"run-tracker-telebot/src/log"
 	databasemanager "run-tracker-telebot/src/pkg/database-manager"
 	imageprocessor "run-tracker-telebot/src/pkg/image-processor"
+	"strings"
 	"time"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
@@ -70,8 +71,12 @@ func NewChatManager(databaseManager *databasemanager.DatabaseManager, imageProce
 }
 
 const (
-	USER = "user"
-	WEEK = "week"
+	USER       = "user"
+	DURATION   = "duration"
+	WEEKRANGE  = "weekrange"
+	WEEK       = "week"
+	MONTH      = "month"
+	MONTHRANGE = "monthrange"
 )
 
 func (cm *ChatManager) Start() {
@@ -104,17 +109,21 @@ func (cm *ChatManager) Start() {
 		},
 	))
 
-	// dispatcher.AddHandler(handlers.NewConversation(
-	// 	[]ext.Handler{handlers.NewCommand("getdistance", cm.handleWelcomeDistance)},
-	// 	map[string][]ext.Handler{
-	// 		WEEK: {handlers.NewMessage(noCommands, cm.handleDistance)},
-	// 	},
-	// 	&handlers.ConversationOpts{
-	// 		Exits:        []ext.Handler{handlers.NewCommand("cancel", cm.handleCancel)},
-	// 		StateStorage: conversation.NewInMemoryStorage(conversation.KeyStrategySenderAndChat),
-	// 		AllowReEntry: true,
-	// 	},
-	// ))
+	dispatcher.AddHandler(handlers.NewConversation(
+		[]ext.Handler{handlers.NewCommand("getdistance", cm.handleWelcomeDistance)},
+		map[string][]ext.Handler{
+			DURATION:   {handlers.NewMessage(noCommands, cm.handleDurationDecision)},
+			WEEK:       {handlers.NewMessage(noCommands, cm.handleWeek)},
+			WEEKRANGE:  {handlers.NewMessage(noCommands, cm.handleWeekRange)},
+			MONTH:      {handlers.NewMessage(noCommands, cm.handleMonth)},
+			MONTHRANGE: {handlers.NewMessage(noCommands, cm.handleMonthRange)},
+		},
+		&handlers.ConversationOpts{
+			Exits:        []ext.Handler{handlers.NewCommand("cancel", cm.handleCancel)},
+			StateStorage: conversation.NewInMemoryStorage(conversation.KeyStrategySenderAndChat),
+			AllowReEntry: true,
+		},
+	))
 
 	dispatcher.AddHandler(handlers.NewCommand("help", cm.handleHelp))
 	dispatcher.AddHandler(handlers.NewMessage(message.Photo, cm.handleImage))
@@ -194,7 +203,7 @@ func (cm *ChatManager) handleAllHistory(b *gotgbot.Bot, ctx *ext.Context) error 
 		message += fmt.Sprintf("User ID: %d\n", userId)
 		for date, workoutEntry := range dates {
 			message += fmt.Sprintf("Date: %s\n", date)
-			message += fmt.Sprintf("- Distance: %s, Pace: %s \n", workoutEntry.Distance, workoutEntry.Pace)
+			message += fmt.Sprintf("- Distance: %sKM, Pace: %s \n", workoutEntry.Distance, workoutEntry.Pace)
 		}
 	}
 
@@ -228,7 +237,7 @@ func (cm *ChatManager) handleUserHistory(b *gotgbot.Bot, ctx *ext.Context) error
 	message += fmt.Sprintf("User ID: %d\n", userID)
 	for date, workout := range userWorkouts {
 		message += fmt.Sprintf("Date: %s\n", date)
-		message += fmt.Sprintf("- Distance: %s, Pace: %s \n", workout.Distance, workout.Pace)
+		message += fmt.Sprintf("- Distance: %sKM, Pace: %s \n", workout.Distance, workout.Pace)
 	}
 
 	// Process and send workouts for the specified user
@@ -322,6 +331,244 @@ func (cm *ChatManager) handleWelcomeDelete(b *gotgbot.Bot, ctx *ext.Context) err
 	}
 
 	return handlers.NextConversationState(USER)
+}
+
+func (cm *ChatManager) handleWelcomeDistance(b *gotgbot.Bot, ctx *ext.Context) error {
+	// Prompt the user to provide the date of the workout entry to delete
+	_, err := ctx.EffectiveMessage.Reply(b, "Do you want to search by WEEK or MONTH?:", nil)
+	if err != nil {
+		log.Warn().Msgf("Error sending message to user in telegram:", err)
+		return err
+	}
+
+	log.Debug().Msgf("Passing to next state: %s", DURATION)
+	return handlers.NextConversationState(DURATION)
+}
+
+func (cm *ChatManager) handleDurationDecision(b *gotgbot.Bot, ctx *ext.Context) error {
+	// Prompt the user to provide the date of the workout entry to delete
+	userInput := ctx.EffectiveMessage.Text
+	log.Debug().Msgf("User Input: %s", userInput)
+
+	if userInput == "WEEK" {
+		log.Debug().Msgf("Passing to next state: %s", WEEK)
+		_, err := ctx.EffectiveMessage.Reply(b, "Please Enter the Date Range that you want to search (startDate, endDate) (format: YYYY-MM-DD, YYYY-MM-DD), example (2024-05-01, 2024-05-10):", nil)
+		if err != nil {
+			log.Warn().Msgf("Error sending message to user in telegram:", err)
+			return err
+		}
+
+		log.Debug().Msgf("Passing to next state: %s", WEEKRANGE)
+		return handlers.NextConversationState(WEEKRANGE)
+	} else if userInput == "MONTH" {
+		log.Debug().Msgf("Passing to next state: %s", MONTH)
+
+		_, err := ctx.EffectiveMessage.Reply(b, "Which Month do you want to search? (format: YYYY-MM) (example: 2024-01)", nil)
+		if err != nil {
+			log.Warn().Msgf("Error sending message to user in telegram:", err)
+			return err
+		}
+
+		return handlers.NextConversationState(MONTHRANGE)
+	} else {
+		log.Debug().Msgf("Invalid input: %s", userInput)
+		_, err := ctx.EffectiveMessage.Reply(b, "You've just entered an invalid input, please use the words WEEK or MONTH", nil)
+		if err != nil {
+			log.Warn().Msgf("Error sending message to user in telegram:", err)
+			return err
+		}
+
+		return err
+	}
+
+}
+
+func (cm *ChatManager) handleWeek(b *gotgbot.Bot, ctx *ext.Context) error {
+	// Prompt the user to provide the date of the workout entry to delete
+	log.Debug().Msgf("Entered into Week state")
+	_, err := ctx.EffectiveMessage.Reply(b, "Please Enter the Date Range that you want to search (startDate, endDate) (format: YYYY-MM-DD, YYYY-MM-DD), example (2024-05-01, 2024-05-10):", nil)
+	if err != nil {
+		log.Warn().Msgf("Error sending message to user in telegram:", err)
+		return err
+	}
+
+	log.Debug().Msgf("Passing to next state: %s", WEEKRANGE)
+	return handlers.NextConversationState(WEEKRANGE)
+}
+
+func (cm *ChatManager) handleWeekRange(b *gotgbot.Bot, ctx *ext.Context) error {
+
+	userInput := ctx.EffectiveMessage.Text
+
+	if !isValidDateRange(userInput) {
+		log.Warn().Msgf("Invalid date range format. Please provide the date range in the format startDate, endDate.")
+		_, err := ctx.EffectiveMessage.Reply(b, "Invalid date range format. Please provide the date range in the format startDate, endDate.", nil)
+		if err != nil {
+			log.Warn().Msgf("Error sending message to user in telegram:", err)
+			return err
+		}
+		return fmt.Errorf("Invalid date range format. Please provide the date range in the format startDate, endDate.")
+	}
+
+	dateRange := strings.TrimSpace(userInput)
+	log.Debug().Msgf("Splitting the dateRange with delimiter ',': %s", dateRange)
+	// Split by comma to get startDate and endDate
+	dates := strings.Split(dateRange, ",")
+	if len(dates) != 2 {
+		log.Warn().Msgf("Invalid date range format. Please provide the date range in the format startDate, endDate.")
+	}
+
+	startDate := strings.TrimSpace(dates[0])
+	endDate := strings.TrimSpace(dates[1])
+
+	// Process the date range
+	totalDistanceByUser, err := cm.DatabaseManager.GetTotalDistanceByWeek(ctx.EffectiveChat.Id, startDate, endDate)
+	if err != nil {
+		log.Warn().Msgf("Error getting total distance for user: %v", err)
+		_, err := b.SendMessage(ctx.EffectiveChat.Id, "Error getting total distance for user.", nil)
+		if err != nil {
+			log.Warn().Msgf("Error sending message to user in telegram:", err)
+			return err
+		}
+		return err
+	}
+
+	var message string
+	message += fmt.Sprintf("Total Distance for each user: \n")
+	for userId, distance := range totalDistanceByUser {
+		message += fmt.Sprintf("User ID: %d, Total Distance: %sKM\n", userId, distance)
+	}
+
+	// Prompt the user to provide the date of the workout entry to delete
+	_, err = ctx.EffectiveMessage.Reply(b, message, nil)
+	if err != nil {
+		log.Warn().Msgf("Error sending message to user in telegram:", err)
+		return err
+	}
+
+	return nil
+}
+
+func isValidDateRange(dateRange string) bool {
+	// Trim any surrounding whitespace
+	dateRange = strings.TrimSpace(dateRange)
+
+	log.Debug().Msgf("Splitting the dateRange with delimiter ',': %s", dateRange)
+	// Split by comma to get startDate and endDate
+	dates := strings.Split(dateRange, ",")
+	if len(dates) != 2 {
+		log.Warn().Msgf("Invalid date range format. Please provide the date range in the format startDate, endDate.")
+		return false
+	}
+
+	startDateStr := strings.TrimSpace(dates[0])
+	endDateStr := strings.TrimSpace(dates[1])
+
+	// Define the date layout
+	const layout = "2006-01-02"
+
+	// Parse startDate
+	startDate, err := time.Parse(layout, startDateStr)
+	if err != nil {
+		log.Warn().Msgf("Error parsing startDate:", err)
+		return false
+	}
+
+	// Parse endDate
+	endDate, err := time.Parse(layout, endDateStr)
+	if err != nil {
+		log.Warn().Msgf("Error parsing endDate:", err)
+		return false
+	}
+
+	// Check if endDate is not earlier than startDate
+	if endDate.Before(startDate) {
+		log.Warn().Msgf("endDate is earlier than startDate")
+		return false
+	}
+
+	// If all checks pass
+	return true
+}
+
+func (cm *ChatManager) handleMonth(b *gotgbot.Bot, ctx *ext.Context) error {
+
+	// Prompt the user to provide the date of the workout entry to delete
+	_, err := ctx.EffectiveMessage.Reply(b, "Which Month do you want to search? (format: YYYY-MM) (example: 2024-01)", nil)
+	if err != nil {
+		log.Warn().Msgf("Error sending message to user in telegram:", err)
+		return err
+	}
+
+	return handlers.NextConversationState(MONTHRANGE)
+}
+
+func (cm *ChatManager) handleMonthRange(b *gotgbot.Bot, ctx *ext.Context) error {
+	userInput := ctx.EffectiveMessage.Text
+
+	if !isValidMonthAndYear(userInput) {
+		log.Warn().Msgf("Invalid month format. Please provide the month in the format YYYY-MM.")
+		_, err := ctx.EffectiveMessage.Reply(b, "Invalid month format. Please provide the month in the format YYYY-MM.", nil)
+		if err != nil {
+			log.Warn().Msgf("Error sending message to user in telegram:", err)
+			return err
+		}
+		return err
+	}
+
+	userInput = strings.TrimSpace(userInput)
+
+	log.Debug().Msgf("Splitting the dateRange with delimiter '-': %s", userInput)
+	// Split by comma to get startDate and endDate
+	dates := strings.Split(userInput, "-")
+	if len(dates) != 2 {
+		log.Warn().Msgf("Invalid date range format. Please provide the date range in the format startDate, endDate.")
+	}
+
+	year := strings.TrimSpace(dates[0])
+	month := strings.TrimSpace(dates[1])
+
+	totalDistanceByUser, err := cm.DatabaseManager.GetTotalDistanceByMonth(ctx.EffectiveChat.Id, month, year)
+	if err != nil {
+		log.Warn().Msgf("Error getting total distance for user: %v", err)
+		_, err := b.SendMessage(ctx.EffectiveChat.Id, "Error getting total distance for user.", nil)
+		if err != nil {
+			log.Warn().Msgf("Error sending message to user in telegram:", err)
+			return err
+		}
+		return err
+	}
+
+	var message string
+	message += fmt.Sprintf("Total Distance for each user: \n")
+	for userId, distance := range totalDistanceByUser {
+		message += fmt.Sprintf("User ID: %d, Total Distance: %sKM\n", userId, distance)
+	}
+
+	_, err = ctx.EffectiveMessage.Reply(b, message, nil)
+	if err != nil {
+		log.Warn().Msgf("Error sending message to user in telegram:", err)
+		return err
+	}
+
+	return nil
+}
+
+func isValidMonthAndYear(userInput string) bool {
+	// Normalize input to uppercase for case-insensitive comparison
+	userInput = strings.ToUpper(strings.TrimSpace(userInput))
+
+	// List of valid month abbreviations
+	const layout = "2006-01"
+
+	// Parse startDate
+	_, err := time.Parse(layout, userInput)
+	if err != nil {
+		log.Warn().Msgf("Error parsing startDate:", err)
+		return false
+	}
+
+	return true
 }
 
 func (cm *ChatManager) downloadFile(url string, filepath string, ctx *ext.Context) error {
@@ -448,7 +695,7 @@ func (cm *ChatManager) handleImage(b *gotgbot.Bot, ctx *ext.Context) error {
 
 		_, err = ctx.EffectiveMessage.Reply(b, "Workout logged!\n"+
 			"Date: "+workoutDetails["Date"]+"\n"+
-			"Distance: "+workoutDetails["Distance"]+"\n"+
+			"Distance: "+workoutDetails["Distance"]+"KM\n"+
 			"Avg Pace: "+workoutDetails["Pace"]+"\n", nil)
 		return err
 	} else {

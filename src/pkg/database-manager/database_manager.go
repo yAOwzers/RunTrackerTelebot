@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"os"
 	"run-tracker-telebot/src/log"
+	"strconv"
 	"sync"
 )
 
@@ -217,4 +218,74 @@ func (db *DatabaseManager) DeleteWorkout(chatID int64, userID int64, date string
 	}
 
 	return true
+}
+
+func (db *DatabaseManager) GetTotalDistanceByWeek(chatId int64, startDate string, endDate string) (map[int64]string, error) {
+	log.Debug().Msgf("Acquiring lock...")
+	db.Data.Lock()
+	defer db.Data.Unlock()
+
+	if db.Data.Workouts[chatId] == nil {
+		log.Warn().Msgf("No workouts found for chat: %v", chatId)
+		return nil, fmt.Errorf("no workouts found for chat: %v", chatId)
+	}
+
+	totalDistance := make(map[int64]string)
+
+	for userID, userWorkouts := range db.Data.Workouts[chatId] {
+		var distance float64
+		for date, workout := range userWorkouts {
+			if date >= startDate && date <= endDate {
+				log.Debug().Msgf("Adding distance to float: %v", workout.Distance)
+				floatValue, err := strconv.ParseFloat(workout.Distance, 64)
+				if err != nil {
+					log.Warn().Msgf("Error parsing distance: %v", err)
+					return nil, fmt.Errorf("error parsing distance: %v", err)
+				}
+
+				log.Debug().Msgf("Adding distance: %v", workout.Distance)
+				distance += floatValue
+			}
+		}
+		totalDistance[userID] = fmt.Sprintf("%.2f", distance)
+	}
+
+	return totalDistance, nil
+}
+
+func (db *DatabaseManager) GetTotalDistanceByMonth(chatId int64, month string, year string) (map[int64]string, error) {
+	log.Debug().Msgf("Acquiring lock...")
+	db.Data.Lock()
+	defer db.Data.Unlock()
+
+	if db.Data.Workouts[chatId] == nil {
+		log.Warn().Msgf("No workouts found for chat: %v", chatId)
+		return nil, fmt.Errorf("no workouts found for chat: %v", chatId)
+	}
+
+	totalDistance := make(map[int64]string)
+
+	log.Debug().Msgf("Month: %v, Year: %v", month, year)
+	for userID, userWorkouts := range db.Data.Workouts[chatId] {
+		var distance float64
+		for date, workout := range userWorkouts {
+			log.Debug().Msgf("date: %v", date)
+			log.Debug().Msgf("month: %v, year: %v", date[5:6], date[0:3])
+			if date[5:7] == month && date[0:4] == year {
+				log.Debug().Msgf("Adding distance to float: %v", workout.Distance)
+				floatValue, err := strconv.ParseFloat(workout.Distance, 64)
+				if err != nil {
+					log.Warn().Msgf("Error parsing distance: %v", err)
+					return nil, fmt.Errorf("error parsing distance: %v", err)
+				}
+
+				log.Debug().Msgf("Adding distance: %v", workout.Distance)
+				distance += floatValue
+			}
+		}
+		totalDistance[userID] = fmt.Sprintf("%.2f", distance)
+	}
+
+	log.Debug().Msgf("Releasing Lock...")
+	return totalDistance, nil
 }
