@@ -9,3 +9,4 @@ services:
       - "8080:8080"
     volumes:
       - ./data/workout_data.json:/app/data/workout_data.json
+      - ./data/authorized_users.json:/app/data/authorized_users.json

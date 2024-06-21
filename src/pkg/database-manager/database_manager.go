@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"os"
 	"run-tracker-telebot/src/log"
+	"run-tracker-telebot/src/pkg/shared"
 	"strconv"
 	"sync"
 )
@@ -21,17 +22,22 @@ type WorkoutEntry struct {
 }
 
 type DatabaseManager struct {
-	FilePath string
-	Data     *WorkoutData
+	FilePath     string
+	UserFilePath string
+	Data         *WorkoutData
+	UserData     *UserToIdMap
 }
 
-const workoutDataDir = "data"
-const workoutDataFile = "workout_data.json"
+type UserToIdMap struct {
+	Users map[int64]string `json:"users"`
+	sync.Mutex
+}
 
-func NewDatabaseManager(filePath string) *DatabaseManager {
+func NewDatabaseManager(filePath string, userFilepath string) *DatabaseManager {
 	return &DatabaseManager{
-		FilePath: filePath,
-		Data:     &WorkoutData{},
+		FilePath:     filePath,
+		UserFilePath: userFilepath,
+		Data:         &WorkoutData{},
 	}
 }
 
@@ -39,6 +45,65 @@ func NewWorkoutData() *WorkoutData {
 	return &WorkoutData{
 		Workouts: make(map[int64]map[int64]map[string]WorkoutEntry),
 	}
+}
+
+func (db *DatabaseManager) LoadUserData() error {
+	if _, err := os.Stat(shared.WORKOUT_DATA_DIR); os.IsNotExist(err) {
+		log.Debug().Msgf("Data dir does not exist, Creating workout data directory: %v", shared.WORKOUT_DATA_DIR)
+		os.Mkdir(shared.WORKOUT_DATA_DIR, os.ModePerm)
+	}
+
+	log.Debug().Msgf("Data Directory Exists...")
+
+	if _, err := os.Stat(shared.WORKOUT_DATA_DIR + "/" + shared.AUTHORIZED_USERS_FILE); os.IsNotExist(err) {
+		log.Debug().Msgf("User data file does not exist, Creating User data file: %v", shared.AUTHORIZED_USERS_FILE)
+		file, err := os.Create(shared.WORKOUT_DATA_DIR + "/" + shared.AUTHORIZED_USERS_FILE)
+		if err != nil {
+			log.Warn().Msgf("Error creating User data file: %v", err)
+		}
+		defer file.Close()
+	}
+
+	fileContent, err := ioutil.ReadFile(shared.WORKOUT_DATA_DIR + "/" + shared.AUTHORIZED_USERS_FILE)
+	if err != nil {
+		log.Warn().Msgf("Error reading file: %v", err)
+		return fmt.Errorf("error reading file: %v", err)
+	}
+
+	// Initialize dm.Data.Workouts map if nil
+	if db.UserData == nil {
+		log.Debug().Msgf("UserData empty, Initializing UserData map")
+		db.UserData = &UserToIdMap{}
+	}
+
+	// Unmarshal JSON into WorkoutData struct
+	if err := json.Unmarshal(fileContent, &db.UserData); err != nil {
+		log.Warn().Msgf("Error unmarshalling JSON: %v", err)
+		return fmt.Errorf("error unmarshalling JSON: %v", err)
+	}
+
+	return nil
+}
+
+func (db *DatabaseManager) SaveUserData() error {
+	file, err := os.Create(db.UserFilePath)
+	if err != nil {
+		log.Warn().Msgf("Error creating file: %v", err)
+		return err
+	}
+	defer file.Close()
+
+	log.Debug().Msgf("Saving data to file: %v", db.UserFilePath)
+	encoder := json.NewEncoder(file)
+
+	log.Debug().Msgf("Encoding data: %v", db.UserData)
+	err = encoder.Encode(db.UserData)
+	if err != nil {
+		log.Warn().Msgf("Error encoding data: %v", err)
+		return err
+	}
+
+	return nil
 }
 
 func (db *DatabaseManager) AddWorkout(groupID, userID int64, date string, entry WorkoutEntry) {
@@ -89,14 +154,14 @@ func (db *DatabaseManager) GetAllWorkouts(groupID int64) (map[int64]map[string]W
 
 func (db *DatabaseManager) LoadData() error {
 
-	if _, err := os.Stat(workoutDataDir); os.IsNotExist(err) {
+	if _, err := os.Stat(shared.WORKOUT_DATA_DIR); os.IsNotExist(err) {
 		log.Debug().Msgf("Data dir does not exist, Creating workout data directory")
-		os.Mkdir(workoutDataDir, os.ModePerm)
+		os.Mkdir(shared.WORKOUT_DATA_DIR, os.ModePerm)
 	}
 
-	if _, err := os.Stat(workoutDataDir + "/" + workoutDataFile); os.IsNotExist(err) {
+	if _, err := os.Stat(shared.WORKOUT_DATA_DIR + "/" + shared.WORKOUT_DATA_FILE); os.IsNotExist(err) {
 		log.Debug().Msgf("Workout data file does not exist, Creating workout data file")
-		file, err := os.Create(workoutDataDir + "/" + workoutDataFile)
+		file, err := os.Create(shared.WORKOUT_DATA_DIR + "/" + shared.WORKOUT_DATA_FILE)
 		if err != nil {
 			log.Warn().Msgf("Error creating workout data file: %v", err)
 		}
@@ -288,4 +353,44 @@ func (db *DatabaseManager) GetTotalDistanceByMonth(chatId int64, month string, y
 
 	log.Debug().Msgf("Releasing Lock...")
 	return totalDistance, nil
+}
+
+func (db *DatabaseManager) SaveUser(userName string, userId int64) error {
+	log.Debug().Msgf("Acquiring lock...")
+	db.UserData.Lock()
+
+	// Check if the map is nil and initialize it if necessary
+	if db.UserData.Users == nil {
+		db.UserData.Users = make(map[int64]string)
+	}
+
+	if _, exist := db.UserData.Users[userId]; exist {
+		log.Warn().Msgf("User already exists: %v", userName)
+		return fmt.Errorf("user already exists: %v", userName)
+	}
+
+	log.Info().Msgf("Adding username for userId: %v - %v", userName, userId)
+	db.UserData.Users[userId] = userName
+
+	log.Debug().Msgf("Writing into database")
+	db.SaveUserData()
+	log.Debug().Msgf("Releasing lock...")
+	return nil
+}
+
+func (db *DatabaseManager) GetUsernameFromId(userId int64) (string, error) {
+	value, exist := db.UserData.Users[userId]
+	if exist {
+		return value, nil
+	} else {
+		return "", fmt.Errorf("user not found")
+	}
+}
+
+func (db *DatabaseManager) IsAuthorizedUser(userId int64) bool {
+	_, exist := db.UserData.Users[userId]
+	if !exist {
+		log.Warn().Msgf("User not authorized: %v", userId)
+	}
+	return exist
 }

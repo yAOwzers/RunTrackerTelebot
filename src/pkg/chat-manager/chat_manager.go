@@ -1,6 +1,7 @@
 package chatmanager
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,6 +38,7 @@ type ChatManager struct {
 	DatabaseManager *databasemanager.DatabaseManager
 	ImageProcessor  *imageprocessor.ImageProcessor
 	Token           string
+	AuthorizedUsers map[int]bool
 }
 
 const TELEGRAM_FILE_URL = "https://api.telegram.org/file/bot"
@@ -51,13 +53,15 @@ func NewChatManager(databaseManager *databasemanager.DatabaseManager, imageProce
 
 	bot, err := gotgbot.NewBot(token, &gotgbot.BotOpts{
 		BotClient: &gotgbot.BaseBotClient{
-			Client: http.Client{},
+			Client:             http.Client{},
+			UseTestEnvironment: false,
 			DefaultRequestOpts: &gotgbot.RequestOpts{
-				Timeout: gotgbot.DefaultTimeout, // Customise the default request timeout here
-				APIURL:  gotgbot.DefaultAPIURL,  // As well as the Default API URL here (in case of using local bot API servers)
+				Timeout: gotgbot.DefaultTimeout,
+				APIURL:  gotgbot.DefaultAPIURL,
 			},
 		},
 	})
+
 	if err != nil {
 		panic("failed to create new bot: " + err.Error())
 	}
@@ -74,10 +78,21 @@ const (
 	USER       = "user"
 	DURATION   = "duration"
 	WEEKRANGE  = "weekrange"
-	WEEK       = "week"
-	MONTH      = "month"
 	MONTHRANGE = "monthrange"
+	ONBOARD    = "onboard"
+	HELP       = "help"
+	AUTH       = "auth"
 )
+
+const HELP_MANUAL = "Commands:\n" +
+	"/start - Start the bot\n" +
+	"/historyUser - Get your workout history\n" +
+	"/historyAll - Get all workout history for the group\n" +
+	"/getdistance - Get total distance for a specified date range (month or week)\n" +
+	"/delete - Delete a workout entry\n" +
+	"/cancel - Cancel the current operation\n" +
+	"/help - Show this help message\n" +
+	"Send a workout image to log the details"
 
 func (cm *ChatManager) Start() {
 
@@ -91,14 +106,31 @@ func (cm *ChatManager) Start() {
 		MaxRoutines: ext.DefaultMaxRoutines,
 	})
 
+	log.Debug().Msgf("Loading authorized users...")
+	cm.DatabaseManager.LoadUserData()
+
 	updater := ext.NewUpdater(dispatcher, nil)
 
 	// Add handlers for commands and messages
-	dispatcher.AddHandler(handlers.NewCommand("start", cm.handleStart))
-	dispatcher.AddHandler(handlers.NewCommand("historyUser", cm.handleUserHistory))
-	dispatcher.AddHandler(handlers.NewCommand("historyAll", cm.handleAllHistory))
+	// dispatcher.AddHandler(handlers.NewCommand("start", cm.handleStart))
 	dispatcher.AddHandler(handlers.NewConversation(
-		[]ext.Handler{handlers.NewCommand("delete", cm.handleWelcomeDelete)},
+		[]ext.Handler{handlers.NewCommand("start", cm.handleStart)},
+		map[string][]ext.Handler{
+			AUTH:    {handlers.NewMessage(noCommands, cm.handleAuth)},
+			ONBOARD: {handlers.NewMessage(noCommands, cm.handleOnboard)},
+			HELP:    {handlers.NewMessage(noCommands, cm.handleHelp)},
+		},
+		&handlers.ConversationOpts{
+			Exits:        []ext.Handler{handlers.NewCommand("cancel", cm.handleCancel)},
+			StateStorage: conversation.NewInMemoryStorage(conversation.KeyStrategySenderAndChat),
+			AllowReEntry: true,
+		},
+	))
+
+	dispatcher.AddHandler(handlers.NewCommand("historyUser", cm.middleWareAuth(cm.handleUserHistory)))
+	dispatcher.AddHandler(handlers.NewCommand("historyAll", cm.middleWareAuth(cm.handleAllHistory)))
+	dispatcher.AddHandler(handlers.NewConversation(
+		[]ext.Handler{handlers.NewCommand("delete", cm.middleWareAuth(cm.handleWelcomeDelete))},
 		map[string][]ext.Handler{
 			USER: {handlers.NewMessage(noCommands, cm.handleDelete)},
 		},
@@ -110,12 +142,10 @@ func (cm *ChatManager) Start() {
 	))
 
 	dispatcher.AddHandler(handlers.NewConversation(
-		[]ext.Handler{handlers.NewCommand("getdistance", cm.handleWelcomeDistance)},
+		[]ext.Handler{handlers.NewCommand("getdistance", cm.middleWareAuth(cm.handleWelcomeDistance))},
 		map[string][]ext.Handler{
 			DURATION:   {handlers.NewMessage(noCommands, cm.handleDurationDecision)},
-			WEEK:       {handlers.NewMessage(noCommands, cm.handleWeek)},
 			WEEKRANGE:  {handlers.NewMessage(noCommands, cm.handleWeekRange)},
-			MONTH:      {handlers.NewMessage(noCommands, cm.handleMonth)},
 			MONTHRANGE: {handlers.NewMessage(noCommands, cm.handleMonthRange)},
 		},
 		&handlers.ConversationOpts{
@@ -146,6 +176,44 @@ func (cm *ChatManager) Start() {
 	updater.Idle()
 }
 
+func (cm *ChatManager) handleAuth(b *gotgbot.Bot, ctx *ext.Context) error {
+
+	userInput := ctx.EffectiveMessage.Text
+
+	if !isValidPassword(userInput) {
+		log.Debug().Msgf("Invalid password: %s", userInput)
+		_, err := ctx.EffectiveMessage.Reply(b, "Bro you sure you're authorized?", nil)
+		if err != nil {
+			log.Warn().Msgf("failed to send message:", err)
+			return fmt.Errorf("failed to send message: %w", err)
+		}
+		return fmt.Errorf("invalid password")
+	}
+
+	log.Debug().Msgf("Password is valid: %s", userInput)
+	log.Debug().Msgf("Passing to next state: %s", ONBOARD)
+
+	_, err := ctx.EffectiveMessage.Reply(b, "Password is valid! Please share with me your name :)", nil)
+	if err != nil {
+		log.Warn().Msgf("failed to send message:", err)
+		return fmt.Errorf("failed to send message: %w", err)
+	}
+
+	return handlers.NextConversationState(ONBOARD)
+}
+
+func isValidPassword(userInput string) bool {
+	log.Debug().Msgf("Checking password: %s", userInput)
+
+	secretPassword, exists := os.LookupEnv("SECRET_PASSWORD")
+	if !exists {
+		log.Warn().Msgf("SECRET_PASSWORD not found in environment variables, please set that up!")
+		return false
+	}
+
+	return userInput == secretPassword
+}
+
 func noCommands(msg *gotgbot.Message) bool {
 	return message.Text(msg) && !message.Command(msg)
 }
@@ -160,27 +228,62 @@ func (cm *ChatManager) handleCancel(b *gotgbot.Bot, ctx *ext.Context) error {
 	return handlers.EndConversation()
 }
 
+func (cm *ChatManager) middleWareAuth(f func(*gotgbot.Bot, *ext.Context) error) func(*gotgbot.Bot, *ext.Context) error {
+
+	return func(b *gotgbot.Bot, ctx *ext.Context) error {
+		if !ctx.EffectiveUser.IsBot && ctx.EffectiveUser.Id != 0 && cm.DatabaseManager.IsAuthorizedUser(ctx.EffectiveUser.Id) {
+			return f(b, ctx)
+		}
+		log.Warn().Msgf("Unauthorized user, or user is a bot, or user has invalid id: %d", ctx.EffectiveUser.Id)
+		_, err := b.SendMessage(ctx.EffectiveChat.Id, "You are not authorized to use this bot, use /start to authenticate.", nil)
+		if err != nil {
+			log.Warn().Msgf("failed to send message:", err)
+			return fmt.Errorf("failed to send message: %w", err)
+		}
+		return nil
+	}
+}
+
 func (cm *ChatManager) handleStart(b *gotgbot.Bot, ctx *ext.Context) error {
-	_, err := b.SendMessage(ctx.EffectiveChat.Id, "Hi! Send me a workout image and I will log the details.", nil)
-	return err
+	_, err := b.SendMessage(ctx.EffectiveChat.Id, "Hi! Before we start, what is the secret password?", nil)
+	if err != nil {
+		log.Warn().Msgf("failed to send message:", err)
+		return fmt.Errorf("failed to send message: %w", err)
+
+	}
+	log.Debug().Msgf("Passing to next state: %s", AUTH)
+	return handlers.NextConversationState(AUTH)
+}
+
+func (cm *ChatManager) handleOnboard(b *gotgbot.Bot, ctx *ext.Context) error {
+
+	userInput := ctx.EffectiveMessage.Text
+	log.Debug().Msgf("User Input: %s", userInput)
+
+	// Save the user's name, only allow to save your own name
+	log.Debug().Msgf("Saving user's name: %s", userInput)
+	cm.DatabaseManager.SaveUser(userInput, ctx.EffectiveUser.Id)
+
+	_, err := ctx.EffectiveMessage.Reply(b, "Welcome "+userInput+"! Send me a workout image and I will log the details.\n"+HELP_MANUAL, nil)
+	if err != nil {
+		log.Warn().Msgf("failed to send message:", err)
+		return fmt.Errorf("failed to send message: %w", err)
+	}
+
+	return handlers.NextConversationState(HELP)
 }
 
 func (cm *ChatManager) handleHelp(b *gotgbot.Bot, ctx *ext.Context) error {
 	helpMessage := "Welcome to Run Tracker Bot!\n" +
-		"Commands:\n" +
-		"/start - Start the bot\n" +
-		"/historyUser - Get your workout history\n" +
-		"/historyAll - Get all workout history for the group\n" +
-		"/delete - Delete a workout entry\n" +
-		"/cancel - Cancel the current operation\n" +
-		"/help - Show this help message\n"
+		HELP_MANUAL
 
-	_, err := ctx.EffectiveMessage.Reply(b, helpMessage, nil)
+	_, err := b.SendMessage(ctx.EffectiveChat.Id, helpMessage, nil)
 	if err != nil {
 		log.Warn().Msgf("failed to send help message:", err)
 		return fmt.Errorf("failed to send help message: %w", err)
 	}
-	return nil
+
+	return err
 }
 
 func (cm *ChatManager) handleAllHistory(b *gotgbot.Bot, ctx *ext.Context) error {
@@ -200,7 +303,13 @@ func (cm *ChatManager) handleAllHistory(b *gotgbot.Bot, ctx *ext.Context) error 
 
 	// Iterate over the groupWorkouts map
 	for userId, dates := range groupWorkouts {
-		message += fmt.Sprintf("User ID: %d\n", userId)
+		username, err := cm.DatabaseManager.GetUsernameFromId(userId)
+		if err != nil {
+			log.Warn().Msgf("Error getting username for user %d: %v", userId, err)
+			return err
+		}
+
+		message += fmt.Sprintf("User: %s\n", username)
 		for date, workoutEntry := range dates {
 			message += fmt.Sprintf("Date: %s\n", date)
 			message += fmt.Sprintf("- Distance: %sKM, Pace: %s \n", workoutEntry.Distance, workoutEntry.Pace)
@@ -234,7 +343,13 @@ func (cm *ChatManager) handleUserHistory(b *gotgbot.Bot, ctx *ext.Context) error
 	}
 
 	var message string
-	message += fmt.Sprintf("User ID: %d\n", userID)
+	username, err := cm.DatabaseManager.GetUsernameFromId(userID)
+	if err != nil {
+		log.Warn().Msgf("Error getting username for user %d: %v", userID, err)
+		return err
+	}
+
+	message += fmt.Sprintf("User: %s\n", username)
 	for date, workout := range userWorkouts {
 		message += fmt.Sprintf("Date: %s\n", date)
 		message += fmt.Sprintf("- Distance: %sKM, Pace: %s \n", workout.Distance, workout.Pace)
@@ -351,7 +466,7 @@ func (cm *ChatManager) handleDurationDecision(b *gotgbot.Bot, ctx *ext.Context) 
 	log.Debug().Msgf("User Input: %s", userInput)
 
 	if userInput == "WEEK" {
-		log.Debug().Msgf("Passing to next state: %s", WEEK)
+		log.Debug().Msgf("Passing to next state: %s", WEEKRANGE)
 		_, err := ctx.EffectiveMessage.Reply(b, "Please Enter the Date Range that you want to search (startDate, endDate) (format: YYYY-MM-DD, YYYY-MM-DD), example (2024-05-01, 2024-05-10):", nil)
 		if err != nil {
 			log.Warn().Msgf("Error sending message to user in telegram:", err)
@@ -361,7 +476,7 @@ func (cm *ChatManager) handleDurationDecision(b *gotgbot.Bot, ctx *ext.Context) 
 		log.Debug().Msgf("Passing to next state: %s", WEEKRANGE)
 		return handlers.NextConversationState(WEEKRANGE)
 	} else if userInput == "MONTH" {
-		log.Debug().Msgf("Passing to next state: %s", MONTH)
+		log.Debug().Msgf("Passing to next state: %s", MONTHRANGE)
 
 		_, err := ctx.EffectiveMessage.Reply(b, "Which Month do you want to search? (format: YYYY-MM) (example: 2024-01)", nil)
 		if err != nil {
@@ -381,19 +496,6 @@ func (cm *ChatManager) handleDurationDecision(b *gotgbot.Bot, ctx *ext.Context) 
 		return err
 	}
 
-}
-
-func (cm *ChatManager) handleWeek(b *gotgbot.Bot, ctx *ext.Context) error {
-	// Prompt the user to provide the date of the workout entry to delete
-	log.Debug().Msgf("Entered into Week state")
-	_, err := ctx.EffectiveMessage.Reply(b, "Please Enter the Date Range that you want to search (startDate, endDate) (format: YYYY-MM-DD, YYYY-MM-DD), example (2024-05-01, 2024-05-10):", nil)
-	if err != nil {
-		log.Warn().Msgf("Error sending message to user in telegram:", err)
-		return err
-	}
-
-	log.Debug().Msgf("Passing to next state: %s", WEEKRANGE)
-	return handlers.NextConversationState(WEEKRANGE)
 }
 
 func (cm *ChatManager) handleWeekRange(b *gotgbot.Bot, ctx *ext.Context) error {
@@ -436,7 +538,13 @@ func (cm *ChatManager) handleWeekRange(b *gotgbot.Bot, ctx *ext.Context) error {
 	var message string
 	message += fmt.Sprintf("Total Distance for each user: \n")
 	for userId, distance := range totalDistanceByUser {
-		message += fmt.Sprintf("User ID: %d, Total Distance: %sKM\n", userId, distance)
+		username, err := cm.DatabaseManager.GetUsernameFromId(userId)
+		if err != nil {
+			log.Warn().Msgf("Error getting username for user %d: %v", userId, err)
+			return err
+		}
+
+		message += fmt.Sprintf("User: %s, Total Distance: %sKM\n", username, distance)
 	}
 
 	// Prompt the user to provide the date of the workout entry to delete
@@ -491,18 +599,6 @@ func isValidDateRange(dateRange string) bool {
 	return true
 }
 
-func (cm *ChatManager) handleMonth(b *gotgbot.Bot, ctx *ext.Context) error {
-
-	// Prompt the user to provide the date of the workout entry to delete
-	_, err := ctx.EffectiveMessage.Reply(b, "Which Month do you want to search? (format: YYYY-MM) (example: 2024-01)", nil)
-	if err != nil {
-		log.Warn().Msgf("Error sending message to user in telegram:", err)
-		return err
-	}
-
-	return handlers.NextConversationState(MONTHRANGE)
-}
-
 func (cm *ChatManager) handleMonthRange(b *gotgbot.Bot, ctx *ext.Context) error {
 	userInput := ctx.EffectiveMessage.Text
 
@@ -539,10 +635,22 @@ func (cm *ChatManager) handleMonthRange(b *gotgbot.Bot, ctx *ext.Context) error 
 		return err
 	}
 
+	convertedMonth, err := convertNumToMonth(month)
+	if err != nil {
+		log.Warn().Msgf("Error converting month to string: %v", err)
+		return err
+	}
+
 	var message string
-	message += fmt.Sprintf("Total Distance for each user: \n")
+	message += fmt.Sprintf("Total Distance for each user in " + convertedMonth + " : \n")
 	for userId, distance := range totalDistanceByUser {
-		message += fmt.Sprintf("User ID: %d, Total Distance: %sKM\n", userId, distance)
+		username, err := cm.DatabaseManager.GetUsernameFromId(userId)
+		if err != nil {
+			log.Warn().Msgf("Error getting username for user %d: %v", userId, err)
+			return err
+		}
+
+		message += fmt.Sprintf("User: %s, Total Distance: %sKM\n", username, distance)
 	}
 
 	_, err = ctx.EffectiveMessage.Reply(b, message, nil)
@@ -552,6 +660,29 @@ func (cm *ChatManager) handleMonthRange(b *gotgbot.Bot, ctx *ext.Context) error 
 	}
 
 	return nil
+}
+
+func convertNumToMonth(month string) (string, error) {
+	months := map[string]string{
+		"01": "JAN",
+		"02": "FEB",
+		"03": "MAR",
+		"04": "APR",
+		"05": "MAY",
+		"06": "JUN",
+		"07": "JUL",
+		"08": "AUG",
+		"09": "SEP",
+		"10": "OCT",
+		"11": "NOV",
+		"12": "DEC",
+	}
+
+	if monthName, exists := months[month]; exists {
+		return monthName, nil
+	}
+
+	return "", errors.New("invalid month format")
 }
 
 func isValidMonthAndYear(userInput string) bool {

@@ -8,6 +8,7 @@ import (
 	chatmanager "run-tracker-telebot/src/pkg/chat-manager"
 	databasemanager "run-tracker-telebot/src/pkg/database-manager"
 	imageprocessor "run-tracker-telebot/src/pkg/image-processor"
+	"run-tracker-telebot/src/pkg/shared"
 	"syscall"
 
 	"github.com/joho/godotenv"
@@ -29,7 +30,10 @@ func main() {
 	}
 
 	imageProcessor := imageprocessor.NewImageProcessor()
-	databaseManager := databasemanager.NewDatabaseManager("data/workout_data.json")
+	databaseManager := databasemanager.NewDatabaseManager(
+		shared.WORKOUT_DATA_DIR+"/"+shared.WORKOUT_DATA_FILE,
+		shared.WORKOUT_DATA_DIR+"/"+shared.AUTHORIZED_USERS_FILE,
+	)
 	chatManager := chatmanager.NewChatManager(databaseManager, imageProcessor)
 
 	err = databaseManager.LoadData()

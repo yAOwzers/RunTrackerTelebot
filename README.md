@@ -11,3 +11,9 @@ Written in Golang, Database stored as a JSON file.
 Deployed on Docker in a self-hosted server. 
 
 TeleBot on long-polling mode.
+
+## Environment Setup
+
+Copy the .env.sample file and rename it to .env with the appropriate keys
+
+run the `run_dev.sh` script. Ensure that you are using Linux/Unix and have docker installed (docker engine/docker desktops)
