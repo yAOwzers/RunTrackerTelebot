@@ -292,8 +292,8 @@ func (cm *ChatManager) handleAllHistory(b *gotgbot.Bot, ctx *ext.Context) error 
 
 	groupWorkouts, err := cm.DatabaseManager.GetAllWorkouts(chatID)
 	if err != nil {
-		log.Warn().Msgf("Error getting all workouts for group %d: %v", chatID, err)
-		_, err := b.SendMessage(ctx.EffectiveChat.Id, "Error getting all workouts for group.", nil)
+		log.Warn().Msgf("Workouts do not exist for groupID %d: %v", chatID, err)
+		_, err := b.SendMessage(ctx.EffectiveChat.Id, "No Workout history exists, please submit images to begin!", nil)
 		return err
 	}
 
@@ -319,7 +319,7 @@ func (cm *ChatManager) handleAllHistory(b *gotgbot.Bot, ctx *ext.Context) error 
 	// Process and send all workouts for the group
 	log.Info().Msgf("All Workouts for Group %d: %v\n", chatID, groupWorkouts)
 
-	_, err = ctx.EffectiveMessage.Reply(b, "Workouts for Group: "+message+"\n", nil)
+	_, err = ctx.EffectiveMessage.Reply(b, "Workouts for Group\n"+message+"\n\n", nil)
 	if err != nil {
 		log.Warn().Msgf("Error sending message to user in telegram:", err)
 		return err
@@ -352,12 +352,12 @@ func (cm *ChatManager) handleUserHistory(b *gotgbot.Bot, ctx *ext.Context) error
 	message += fmt.Sprintf("User: %s\n", username)
 	for date, workout := range userWorkouts {
 		message += fmt.Sprintf("Date: %s\n", date)
-		message += fmt.Sprintf("- Distance: %sKM, Pace: %s \n", workout.Distance, workout.Pace)
+		message += fmt.Sprintf("- Distance: %sKM, Pace: %s \n\n", workout.Distance, workout.Pace)
 	}
 
 	// Process and send workouts for the specified user
 	log.Info().Msgf("Workouts for User %d: %v\n", userID, userWorkouts)
-	_, err = ctx.EffectiveMessage.Reply(b, "Workouts for User:\n "+message+"\n", nil)
+	_, err = ctx.EffectiveMessage.Reply(b, "Workouts for User!\n "+message+"\n", nil)
 	if err != nil {
 		log.Warn().Msgf("Error sending message to user in telegram:", err)
 		return err
@@ -450,7 +450,7 @@ func (cm *ChatManager) handleWelcomeDelete(b *gotgbot.Bot, ctx *ext.Context) err
 
 func (cm *ChatManager) handleWelcomeDistance(b *gotgbot.Bot, ctx *ext.Context) error {
 	// Prompt the user to provide the date of the workout entry to delete
-	_, err := ctx.EffectiveMessage.Reply(b, "Do you want to search by WEEK or MONTH?:", nil)
+	_, err := b.SendMessage(ctx.EffectiveChat.Id, "Do you want to search by WEEK or MONTH?:", nil)
 	if err != nil {
 		log.Warn().Msgf("Error sending message to user in telegram:", err)
 		return err
@@ -792,14 +792,25 @@ func (cm *ChatManager) handleImage(b *gotgbot.Bot, ctx *ext.Context) error {
 		return err
 	}
 
-	workoutDetails, err := cm.ImageProcessor.ParseWorkoutDetails(text)
-	if err != nil {
-		log.Warn().Msgf("Error extracting workout details:", err)
-		_, err := b.SendMessage(ctx.EffectiveChat.Id, "Error extracting workout details. Please try again.", nil)
-		return err
+	isApple := cm.ImageProcessor.IsAppleWorkout(text)
+	var workoutDetails map[string]string
+	if isApple {
+		workoutDetails, err = cm.ImageProcessor.ParseWorkoutDetails(text)
+		if err != nil {
+			log.Warn().Msgf("Error extracting workout details:", err)
+			_, err := b.SendMessage(ctx.EffectiveChat.Id, "Error extracting workout details. Please try again.", nil)
+			return err
+		}
+		log.Debug().Msgf("Workout details: %v", workoutDetails)
+	} else if cm.ImageProcessor.IsRunKeeper(text) {
+		workoutDetails, err = cm.ImageProcessor.ParseRunKeepWorkoutDetails(text)
+		if err != nil {
+			log.Warn().Msgf("Error extracting workout details:", err)
+			_, err := b.SendMessage(ctx.EffectiveChat.Id, "Error extracting workout details. Please try again.", nil)
+			return err
+		}
+		log.Debug().Msgf("Workout details: %v", workoutDetails)
 	}
-
-	log.Debug().Msgf("Workout details: %v", workoutDetails)
 
 	// Save the workout data
 	log.Debug().Msgf("Locking the database")

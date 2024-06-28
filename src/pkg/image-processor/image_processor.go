@@ -75,6 +75,53 @@ func (ip *ImageProcessor) ParseWorkoutDetails(text string) (map[string]string, e
 	return workoutDetails, nil
 }
 
+func (ip *ImageProcessor) ParseRunKeepWorkoutDetails(text string) (map[string]string, error) {
+	// Define regular expressions for matching
+	distanceRegex := regexp.MustCompile(`\b\d+\.\d+\b`)
+	paceRegex := regexp.MustCompile(`\b\d{1,2}:\d{2}\b`)
+	// timeRegex := regexp.MustCompile(`\b\d{1,2}:\d{2}\b`) // To extract total time
+	caloriesRegex := regexp.MustCompile(`\b\d+\b`) // To extract calories
+
+	// Extract details using regular expressions
+	distance := distanceRegex.FindString(text)
+	timeAndPaceMatches := paceRegex.FindAllString(text, -1)
+	calories := caloriesRegex.FindString(text)
+
+	// Ensure the first pace match is not the total time
+	if len(timeAndPaceMatches) < 2 || len(calories) < 1 {
+		log.Printf("Error extracting workout details")
+		return nil, nil
+	}
+
+	totalTime := timeAndPaceMatches[1]
+	pace := timeAndPaceMatches[0]
+
+	log.Debug().Msgf("Total Time: %s", totalTime)
+	log.Debug().Msgf("Distance: %s", distance)
+	log.Debug().Msgf("Pace: %s", pace)
+	log.Debug().Msgf("Calories: %s", calories)
+
+	if distance == "" || pace == "" {
+		log.Warn().Msgf("Error extracting workout details")
+		return nil, nil
+	}
+
+	// Clean distance data
+	distance = cleanDistanceData(distance)
+
+	date := time.Now().Format("2006-01-02")
+	// Store extracted details in a map
+	workoutDetails := map[string]string{
+		"Date":      date,
+		"Distance":  distance,
+		"TotalTime": totalTime,
+		"Pace":      pace,
+		"Calories":  calories,
+	}
+
+	return workoutDetails, nil
+}
+
 func cleanDistanceData(distance string) string {
 	log.Debug().Msgf("Cleaning distance data: %s", distance)
 
@@ -87,4 +134,35 @@ func cleanDistanceData(distance string) string {
 	log.Debug().Msgf("After replacing strings: %s", distance)
 
 	return distance
+}
+
+func (ip *ImageProcessor) IsAppleWorkout(text string) bool {
+	keywords := []string{
+		"Workout", "Time", "Distance",
+		"Active Kilocalories", "Total Kilocalories",
+	}
+
+	for _, keyword := range keywords {
+		if !strings.Contains(text, keyword) {
+			log.Debug().Msgf("Keyword not found in Text: %v", keyword)
+			log.Debug().Msgf("Not Apple Workout")
+			return false
+		}
+	}
+	return true
+}
+
+func (ip *ImageProcessor) IsRunKeeper(text string) bool {
+	keywords := []string{
+		"km", "time", "min/km", "Calories",
+	}
+
+	for _, keyword := range keywords {
+		if !strings.Contains(text, keyword) {
+			log.Debug().Msgf("Keyword not found in Text: %v", keyword)
+			log.Debug().Msgf("Not Run Keeper")
+			return false
+		}
+	}
+	return true
 }
