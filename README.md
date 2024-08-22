@@ -12,6 +12,8 @@ Deployed on Docker in a self-hosted server.
 
 TeleBot on long-polling mode.
 
+The bot uses Tesseract for OCR, using the otiai10 library [here](https://github.com/otiai10/gosseract).
+
 ## Environment Setup
 
 Copy the .env.sample file and rename it to .env with the appropriate keys
